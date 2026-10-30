@@ -97,6 +97,7 @@ final class HubDropModel {
         }
 
         do {
+            try await downloadFromICloudIfNeeded(files)
             for simulator in targets {
                 if !simulator.isBooted {
                     try await SimulatorService.boot(simulator)
@@ -140,6 +141,52 @@ final class HubDropModel {
     nonisolated private static func isMedia(_ url: URL) -> Bool {
         guard let type = (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType else { return false }
         return acceptedTypes.contains { type.conforms(to: $0) }
+    }
+
+    /// Downloads any dropped files that iCloud has evicted and waits for them to land.
+    ///
+    /// `simctl addmedia` cannot handle a dataless file: CoreSimulator's bridge request fails
+    /// and simctl dies building an NSError with a nil domain (seen 2026-10-27 on Xcode 27.1).
+    /// Only `.notDownloaded` is a problem. A stale `.downloaded` copy still has bytes on disk.
+    nonisolated private func downloadFromICloudIfNeeded(_ files: [URL]) async throws {
+        let evicted = files.filter { Self.cloudState(of: $0)?.ubiquitousItemDownloadingStatus == .notDownloaded }
+        guard !evicted.isEmpty else { return }
+
+        logger.info("Downloading \(evicted.count) evicted iCloud file(s) before adding")
+        for url in evicted {
+            try FileManager.default.startDownloadingUbiquitousItem(at: url)
+        }
+
+        let deadline = ContinuousClock.now + Self.downloadTimeout
+        for url in evicted {
+            while true {
+                let state = Self.cloudState(of: url)
+                if let error = state?.ubiquitousItemDownloadingError {
+                    throw error
+                }
+                if state?.ubiquitousItemDownloadingStatus != .notDownloaded {
+                    break
+                }
+                guard ContinuousClock.now < deadline else {
+                    throw DownloadTimeout(fileName: url.lastPathComponent)
+                }
+                try await Task.sleep(for: .milliseconds(500))
+            }
+        }
+    }
+
+    nonisolated private static let downloadTimeout: Duration = .seconds(300)
+
+    /// Reads iCloud state from a fresh URL. Resource values are cached per URL instance,
+    /// so polling the dropped URL itself would never observe the download finishing.
+    nonisolated private static func cloudState(of url: URL) -> URLResourceValues? {
+        try? URL(filePath: url.path(percentEncoded: false))
+            .resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey, .ubiquitousItemDownloadingErrorKey])
+    }
+
+    private struct DownloadTimeout: LocalizedError {
+        let fileName: String
+        var errorDescription: String? { "\(fileName) is still downloading from iCloud. Try again once it has finished." }
     }
 
     private func applyLaunchAtLogin() {

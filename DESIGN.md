@@ -1,6 +1,6 @@
 # HubDrop design
 
-Last updated 2026-10-19.
+Last updated 2026-10-27.
 
 ## Why
 
@@ -26,6 +26,7 @@ Seeding test media is a daily task when building an app that imports photos or v
 - The panel also has a drop zone, a refresh button, the last result line, a Launch at Login checkbox, and Quit.
 - Quit is a plain `NSApp.terminate`. On macOS 27 that logs one line per run: ``-close` should not be called on windows that the application did not create or own``. It is AppKit talking to itself: `terminate:` sends `_closeForTermination` to every window in the app's window list, and the popover's private window class warns unconditionally on any `-close` before forwarding to its popover. Closing or releasing the `NSPopover` first does not help, because its window is only ever ordered out and stays in the window list (verified by disassembly on 2026-10-19). The only fix is to stop using `NSPopover` and host the panel in an app-owned `NSPanel`. Until that is worth doing, the line is accepted and should be reported to Apple.
 - Dropping a folder adds every image, movie, and vCard at its top level, sorted by name. Nested folders are not descended. Live Photo HEIC and MOV pairs are matched by `simctl` itself.
+- Files that iCloud has evicted (dataless placeholders, the cloud icon in Finder) are downloaded first with `startDownloadingUbiquitousItem` and the model polls `ubiquitousItemDownloadingStatus` until each one has a local copy, with a five-minute limit. Without this `simctl addmedia` itself crashes: CoreSimulator's bridge request fails and simctl dies with `Invalid domain=nil in -[NSError initWithDomain:code:userInfo:]` (reproduced from the command line on 2026-10-27 with Xcode 27.1). Worth a Feedback to Apple; HubDrop just avoids the input.
 - On failure the icon shows a warning glyph and the panel opens with the text `simctl` printed.
 - The app is an agent (`LSUIElement`), so no Dock icon. Cmd-comma opens a small Settings window with the Launch at Login toggle and a one-line usage hint, because a SwiftUI `App` needs at least one scene.
 
@@ -38,7 +39,7 @@ All in `HubDrop/`. The target uses a file-system-synchronized group, so new file
 | `HubDropApp.swift` | `@main` App. Installs `AppDelegate` via `@NSApplicationDelegateAdaptor`. Its only scene is `Settings`. |
 | `AppDelegate.swift` | Creates the `NSStatusItem`, the `NSPopover` hosting `DropPanel`, and the `StatusItemDropView`. Flashes result glyphs on the icon. Owns the single `HubDropModel`. |
 | `StatusItemDropView.swift` | `NSView` subclass added as a subview of the status bar button. Registers for `.fileURL` drags, highlights the button while a drag hovers, forwards clicks to the button with `performClick`. |
-| `HubDropModel.swift` | `@Observable` app model. Simulator list, target mode, selected UDIDs (persisted in `UserDefaults`), busy flag, last `Outcome`, Launch at Login via `SMAppService.mainApp`. `add(_:)` filters the drop to media files, boots targets as needed, calls `simctl`, and reports through the `feedback` closure. |
+| `HubDropModel.swift` | `@Observable` app model. Simulator list, target mode, selected UDIDs (persisted in `UserDefaults`), busy flag, last `Outcome`, Launch at Login via `SMAppService.mainApp`. `add(_:)` filters the drop to media files, downloads evicted iCloud files, boots targets as needed, calls `simctl`, and reports through the `feedback` closure. |
 | `SimulatorService.swift` | Stateless `simctl` wrapper. `listSimulators()` parses `simctl list devices -j` and keeps available iOS and xrOS devices, booted first. `boot(_:)` and `addMedia(_:to:)`. The private `run(_:)` spawns `/usr/bin/xcrun`, drains stdout and stderr concurrently so a large JSON payload cannot stall the child, and throws `CommandFailure` with the tool's output on a non-zero exit. |
 | `DropPanel.swift` | The SwiftUI panel. Fixed width 320. Simulator list height is computed from the row count and capped at 200 so the popover sizes itself. Uses `dropDestination(for: URL.self)`. |
 | `Assets.xcassets` | Accent colour only. The app icon is not here. |
